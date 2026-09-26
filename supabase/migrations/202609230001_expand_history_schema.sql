@@ -1,0 +1,284 @@
+begin;
+
+alter table public.people add column slug text;
+alter table public.places add column slug text;
+alter table public.events add column slug text;
+
+update public.people set slug = 'abu-bakr-al-siddiq' where id = 1;
+update public.people set slug = 'umar-ibn-al-khattab' where id = 2;
+update public.people set slug = 'uthman-ibn-affan' where id = 3;
+update public.people set slug = 'ali-ibn-abi-talib' where id = 4;
+
+update public.places set slug = 'al-madinah-al-munawwarah' where id = 1;
+update public.places set slug = 'al-yamamah' where id = 2;
+update public.places set slug = 'al-qadisiyyah' where id = 3;
+update public.places set slug = 'al-quds' where id = 4;
+update public.places set slug = 'al-basrah' where id = 5;
+update public.places set slug = 'al-kufah' where id = 6;
+
+update public.events set slug = 'battle-of-al-yamamah' where id = 1;
+update public.events set slug = 'collection-of-the-quran' where id = 2;
+update public.events set slug = 'umar-receives-al-quds' where id = 3;
+update public.events set slug = 'battle-of-al-qadisiyyah' where id = 4;
+update public.events set slug = 'standardization-of-the-quran' where id = 5;
+update public.events set slug = 'battle-of-the-camel' where id = 6;
+
+do $$
+begin
+  if exists (select 1 from public.people where slug is null) then
+    raise exception 'people slug backfill failed: NULL slug remains';
+  end if;
+
+  if exists (
+    select slug
+    from public.people
+    group by slug
+    having count(*) > 1
+  ) then
+    raise exception 'people slug backfill failed: duplicate slug remains';
+  end if;
+
+  if exists (select 1 from public.places where slug is null) then
+    raise exception 'places slug backfill failed: NULL slug remains';
+  end if;
+
+  if exists (
+    select slug
+    from public.places
+    group by slug
+    having count(*) > 1
+  ) then
+    raise exception 'places slug backfill failed: duplicate slug remains';
+  end if;
+
+  if exists (select 1 from public.events where slug is null) then
+    raise exception 'events slug backfill failed: NULL slug remains';
+  end if;
+
+  if exists (
+    select slug
+    from public.events
+    group by slug
+    having count(*) > 1
+  ) then
+    raise exception 'events slug backfill failed: duplicate slug remains';
+  end if;
+end
+$$;
+
+alter table public.people
+  alter column slug set not null,
+  add constraint people_slug_key unique (slug);
+
+alter table public.places
+  alter column slug set not null,
+  add constraint places_slug_key unique (slug);
+
+alter table public.events
+  alter column slug set not null,
+  add constraint events_slug_key unique (slug);
+
+alter table public.places add column coordinate_confidence text;
+
+update public.places
+set coordinate_confidence = 'approximate'
+where coordinate_confidence is null;
+
+do $$
+begin
+  if exists (
+    select 1
+    from public.places
+    where coordinate_confidence is null
+  ) then
+    raise exception 'places coordinate_confidence backfill failed: NULL value remains';
+  end if;
+end
+$$;
+
+alter table public.places
+  alter column coordinate_confidence set not null;
+
+create table public.period_people (
+  period_id bigint not null references public.periods (id) on delete cascade,
+  person_id bigint not null references public.people (id) on delete cascade,
+  role text not null,
+  is_primary boolean not null default false,
+  primary key (period_id, person_id)
+);
+
+do $$
+declare
+  expected_relationship_count bigint;
+  inserted_relationship_count bigint;
+begin
+  select count(*)
+  into expected_relationship_count
+  from public.people
+  where period_id is not null;
+
+  insert into public.period_people (period_id, person_id, role, is_primary)
+  select period_id, id, 'caliph', true
+  from public.people
+  where period_id is not null;
+
+  get diagnostics inserted_relationship_count = row_count;
+
+  if inserted_relationship_count <> expected_relationship_count then
+    raise exception
+      'period_people backfill failed: inserted % rows, expected %',
+      inserted_relationship_count,
+      expected_relationship_count;
+  end if;
+
+  if exists (
+    select 1
+    from public.people as person
+    where person.period_id is not null
+      and (
+        select count(*)
+        from public.period_people as relationship
+        where relationship.person_id = person.id
+          and relationship.period_id = person.period_id
+          and relationship.role = 'caliph'
+          and relationship.is_primary = true
+      ) <> 1
+  ) then
+    raise exception 'period_people backfill failed: one or more person-period mappings do not match';
+  end if;
+end
+$$;
+
+alter table public.people drop column period_id;
+
+create table public.event_people (
+  event_id bigint not null references public.events (id) on delete cascade,
+  person_id bigint not null references public.people (id) on delete cascade,
+  role text not null,
+  primary key (event_id, person_id)
+);
+
+create table public.sources (
+  id bigint generated by default as identity primary key,
+  title text not null,
+  url text not null,
+  source_type text not null,
+  constraint sources_source_type_check
+    check (source_type in ('book', 'article', 'hadith', 'encyclopedia', 'other'))
+);
+
+create table public.event_sources (
+  event_id bigint not null references public.events (id) on delete cascade,
+  source_id bigint not null references public.sources (id) on delete cascade,
+  primary key (event_id, source_id)
+);
+
+create table public.person_sources (
+  person_id bigint not null references public.people (id) on delete cascade,
+  source_id bigint not null references public.sources (id) on delete cascade,
+  primary key (person_id, source_id)
+);
+
+create table public.map_layers (
+  id bigint generated by default as identity primary key,
+  period_id bigint not null references public.periods (id) on delete cascade,
+  name text not null,
+  layer_type text not null,
+  geojson jsonb not null,
+  confidence text not null
+);
+
+alter table public.events
+  add column significance text,
+  add column start_year integer,
+  add column end_year integer;
+
+update public.events
+set start_year = event_year;
+
+do $$
+begin
+  if exists (
+    select 1
+    from public.events
+    where start_year is distinct from event_year
+  ) then
+    raise exception 'events start_year backfill failed: value does not match event_year';
+  end if;
+end
+$$;
+
+alter table public.events
+  drop column event_year,
+  add constraint events_year_range_check
+    check (
+      end_year is null
+      or start_year is null
+      or end_year >= start_year
+    );
+
+create index periods_era_id_idx on public.periods (era_id);
+create index events_period_id_idx on public.events (period_id);
+create index events_place_id_idx on public.events (place_id);
+create index map_layers_period_id_idx on public.map_layers (period_id);
+create index period_people_person_id_idx on public.period_people (person_id);
+create index event_people_person_id_idx on public.event_people (person_id);
+create index event_sources_source_id_idx on public.event_sources (source_id);
+create index person_sources_source_id_idx on public.person_sources (source_id);
+
+alter table public.period_people enable row level security;
+alter table public.event_people enable row level security;
+alter table public.sources enable row level security;
+alter table public.event_sources enable row level security;
+alter table public.person_sources enable row level security;
+alter table public.map_layers enable row level security;
+
+revoke all on table
+  public.period_people,
+  public.event_people,
+  public.sources,
+  public.event_sources,
+  public.person_sources,
+  public.map_layers
+from anon, authenticated;
+
+grant select on table
+  public.period_people,
+  public.event_people,
+  public.sources,
+  public.event_sources,
+  public.person_sources,
+  public.map_layers
+to anon, authenticated;
+
+create policy "Public period people are readable"
+on public.period_people for select
+to anon, authenticated
+using (true);
+
+create policy "Public event people are readable"
+on public.event_people for select
+to anon, authenticated
+using (true);
+
+create policy "Public sources are readable"
+on public.sources for select
+to anon, authenticated
+using (true);
+
+create policy "Public event sources are readable"
+on public.event_sources for select
+to anon, authenticated
+using (true);
+
+create policy "Public person sources are readable"
+on public.person_sources for select
+to anon, authenticated
+using (true);
+
+create policy "Public map layers are readable"
+on public.map_layers for select
+to anon, authenticated
+using (true);
+
+commit;

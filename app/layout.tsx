@@ -1,14 +1,16 @@
 import type { Metadata } from "next";
+import "@fontsource/cairo/400.css";
+import "@fontsource/cairo/600.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Arabian Peninsula Map",
-  description: "An interactive map of locations across the Arabian Peninsula.",
+  title: "خريطة التاريخ الإسلامي",
+  description: "خريطة تفاعلية لأماكن وأحداث من عصر الخلافة الراشدة.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className="h-full antialiased">
+    <html lang="ar" dir="rtl" className="h-full antialiased">
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
   );

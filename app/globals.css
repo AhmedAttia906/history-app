@@ -1,24 +1,105 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f3ead8;
+  --foreground: #2e392f;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --font-sans: "Cairo", "Segoe UI", Tahoma, Arial, sans-serif;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: "Cairo", "Segoe UI", Tahoma, Arial, sans-serif;
+}
+
+.biography-book-perspective {
+  perspective: 900px;
+}
+
+.biography-book-page {
+  position: relative;
+  min-height: 14.5rem;
+  border: 1px solid rgb(207 180 111 / 55%);
+  border-radius: 0.75rem;
+  background:
+    linear-gradient(90deg, rgb(169 124 47 / 4%), transparent 9%, transparent 91%, rgb(169 124 47 / 3%)),
+    #fffdf7;
+  padding: 1rem 1.125rem;
+  box-shadow: inset 0 0 2.5rem rgb(123 91 43 / 4%);
+  transform-origin: right center;
+}
+
+.biography-book-page--next {
+  animation: biography-page-next 240ms ease-out;
+}
+
+.biography-book-page--previous {
+  animation: biography-page-previous 240ms ease-out;
+}
+
+@keyframes biography-page-next {
+  from {
+    opacity: 0.35;
+    transform: rotateY(-3deg) translateX(-0.35rem);
+  }
+  to {
+    opacity: 1;
+    transform: rotateY(0) translateX(0);
+  }
+}
+
+@keyframes biography-page-previous {
+  from {
+    opacity: 0.35;
+    transform: rotateY(3deg) translateX(0.35rem);
+  }
+  to {
+    opacity: 1;
+    transform: rotateY(0) translateX(0);
+  }
+}
+
+@media (min-width: 640px) {
+  .biography-book-page {
+    min-height: 15.5rem;
+    padding: 1.25rem 1.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .biography-book-page--next,
+  .biography-book-page--previous {
+    animation: none;
+  }
 }
 
 .maplibregl-popup-content {
-  color: #0f172a;
+  direction: rtl;
+  font-family: inherit;
+  background: #fffaf0;
+  border: 1px solid #cfb46f;
+  border-radius: 0.875rem;
+  color: #2e392f;
   min-width: 12rem;
+  padding: 0.875rem 1rem;
+  text-align: right;
+  unicode-bidi: plaintext;
+}
+
+.maplibregl-popup-anchor-bottom .maplibregl-popup-tip {
+  border-top-color: #cfb46f;
+}
+
+.maplibregl-popup-close-button {
+  color: #315b4b;
+  font-size: 1.125rem;
+  inset-inline-end: 0.25rem;
+  inset-inline-start: auto;
 }
 
 .maplibregl-popup-content strong {
@@ -29,4 +110,15 @@ body {
 
 .maplibregl-popup-content p {
   line-height: 1.4;
+}
+
+.map-popup-event + .map-popup-event {
+  border-top: 1px solid #dfcfa9;
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+}
+
+.map-popup-event-heading {
+  font-weight: 600;
+  margin-bottom: 0.125rem;
 }
