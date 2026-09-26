@@ -9,16 +9,19 @@ type BiographyBookProps = {
 };
 
 type SectionBoundary = {
-  heading: string;
+  heading: string | null;
   startsWith: string;
+};
+
+type BiographyConfiguration = {
+  boundaries: SectionBoundary[];
+  pageBreakAfter: number[];
 };
 
 type BiographySection = {
   heading: string | null;
   text: string;
 };
-
-const ABU_BAKR_NAME = "أبو بكر الصديق";
 
 // Presentation-only boundaries. Every marker is an exact substring of the
 // stored biography; the text itself is sliced, never rewritten.
@@ -57,17 +60,89 @@ export const ABU_BAKR_SECTION_BOUNDARIES: SectionBoundary[] = [
   },
 ];
 
-const SECTIONS_PER_PAGE = 2;
+export const UMAR_SECTION_BOUNDARIES: SectionBoundary[] = [
+  {
+    heading: "نسبه ونشأته",
+    startsWith: "عمر بن الخطاب رضي الله عنه هو عمر بن الخطاب بن نفيل",
+  },
+  {
+    heading: "إسلامه وهجرته",
+    startsWith: "حين بُعث النبي محمد ﷺ في مكة",
+  },
+  {
+    heading: null,
+    startsWith: "ما إن أسلم عمر حتى صار في جماعة المسلمين",
+  },
+  {
+    heading: "مع النبي ﷺ",
+    startsWith: "استقر عمر في المدينة",
+  },
+  {
+    heading: "مع أبي بكر وجمع القرآن",
+    startsWith: "وعندما توفي رسول الله ﷺ سنة 11هـ",
+  },
+  {
+    heading: null,
+    startsWith: "في خلافة أبي بكر كان عمر من أقرب من يشاوره الخليفة",
+  },
+  {
+    heading: "توليه الخلافة",
+    startsWith: "لما مرض أبو بكر في سنة 13هـ",
+  },
+  {
+    heading: "فتوح الشام والعراق",
+    startsWith: "في الشام استمرت المواجهة مع الدولة البيزنطية",
+  },
+  {
+    heading: null,
+    startsWith: "وفي العراق كانت المواجهة الكبرى مع الدولة الساسانية",
+  },
+  {
+    heading: "بيت المقدس وتنظيم الدولة",
+    startsWith: "وفي بلاد الشام بلغ المسلمون بيت المقدس",
+  },
+  {
+    heading: null,
+    startsWith: "ومع تدفق الأموال واتساع عدد الجند والرعية",
+  },
+  {
+    heading: "عام الرمادة وطاعون عمواس",
+    startsWith: "لم تكن سنوات خلافته كلها سنوات فتح ورخاء",
+  },
+  {
+    heading: "فتح مصر ونهاوند",
+    startsWith: "ثم اتجهت الجيوش إلى مصر بقيادة عمرو بن العاص",
+  },
+  {
+    heading: "استشهاده والشورى",
+    startsWith: "ومع هذه المساحة الواسعة بقي مركز الخلافة في المدينة",
+  },
+  {
+    heading: null,
+    startsWith: "وفي أواخر ذي الحجة سنة 23هـ خرج عمر لصلاة الفجر",
+  },
+];
+
+const BIOGRAPHY_CONFIGURATIONS: Record<string, BiographyConfiguration> = {
+  "أبو بكر الصديق": {
+    boundaries: ABU_BAKR_SECTION_BOUNDARIES,
+    pageBreakAfter: [2, 4, 6, 8],
+  },
+  "عمر بن الخطاب": {
+    boundaries: UMAR_SECTION_BOUNDARIES,
+    pageBreakAfter: [1, 3, 4, 6, 7, 9, 11, 12, 13, 15],
+  },
+};
 
 function sectionBiography(
-  personName: string,
   biography: string,
+  configuration: BiographyConfiguration | undefined,
 ): BiographySection[] {
-  if (personName !== ABU_BAKR_NAME) {
+  if (!configuration) {
     return [{ heading: null, text: biography }];
   }
 
-  const offsets = ABU_BAKR_SECTION_BOUNDARIES.map(({ startsWith }) =>
+  const offsets = configuration.boundaries.map(({ startsWith }) =>
     biography.indexOf(startsWith),
   );
   const boundariesMatch = offsets.every(
@@ -80,7 +155,7 @@ function sectionBiography(
     return [{ heading: null, text: biography }];
   }
 
-  const sections = ABU_BAKR_SECTION_BOUNDARIES.map((boundary, index) => ({
+  const sections = configuration.boundaries.map((boundary, index) => ({
     heading: boundary.heading,
     text: biography.slice(offsets[index], offsets[index + 1]),
   }));
@@ -94,14 +169,27 @@ function sectionBiography(
   return sections;
 }
 
-function paginateSections(sections: BiographySection[]) {
-  const pages: BiographySection[][] = [];
-
-  for (let index = 0; index < sections.length; index += SECTIONS_PER_PAGE) {
-    pages.push(sections.slice(index, index + SECTIONS_PER_PAGE));
+function paginateSections(
+  sections: BiographySection[],
+  configuration: BiographyConfiguration | undefined,
+) {
+  if (!configuration) {
+    return [sections];
   }
 
-  return pages.length > 0 ? pages : [[{ heading: null, text: "" }]];
+  const pages: BiographySection[][] = [];
+  let pageStart = 0;
+
+  for (const pageEnd of configuration.pageBreakAfter) {
+    if (pageEnd <= pageStart || pageEnd > sections.length) {
+      return [sections];
+    }
+
+    pages.push(sections.slice(pageStart, pageEnd));
+    pageStart = pageEnd;
+  }
+
+  return pageStart === sections.length && pages.length > 0 ? pages : [sections];
 }
 
 export default function BiographyBook({
@@ -109,9 +197,14 @@ export default function BiographyBook({
   personName,
   biography,
 }: BiographyBookProps) {
+  const configuration = BIOGRAPHY_CONFIGURATIONS[personName];
   const pages = useMemo(
-    () => paginateSections(sectionBiography(personName, biography)),
-    [biography, personName],
+    () =>
+      paginateSections(
+        sectionBiography(biography, configuration),
+        configuration,
+      ),
+    [biography, configuration],
   );
   const [pageIndex, setPageIndex] = useState(0);
   const [turnDirection, setTurnDirection] = useState<"next" | "previous">(

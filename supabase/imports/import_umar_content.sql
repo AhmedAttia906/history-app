@@ -1,3 +1,51 @@
+begin;
+
+do $schema_check$
+declare
+  missing_columns text;
+begin
+  select string_agg(required.table_name || '.' || required.column_name, ', ' order by required.table_name, required.column_name)
+  into missing_columns
+  from (
+    values
+      ('people', 'id'), ('people', 'slug'), ('people', 'name'), ('people', 'brief_bio'),
+      ('period_people', 'period_id'), ('period_people', 'person_id'),
+      ('period_people', 'role'), ('period_people', 'is_primary'),
+      ('places', 'id'), ('places', 'slug'), ('places', 'name'), ('places', 'lat'),
+      ('places', 'lng'), ('places', 'coordinate_confidence'), ('places', 'location_note'),
+      ('events', 'id'), ('events', 'slug'), ('events', 'period_id'), ('events', 'place_id'),
+      ('events', 'title'), ('events', 'description'), ('events', 'significance'),
+      ('events', 'start_year'), ('events', 'end_year'),
+      ('sources', 'id'), ('sources', 'title'), ('sources', 'url'),
+      ('sources', 'source_type'), ('sources', 'author'),
+      ('event_sources', 'event_id'), ('event_sources', 'source_id'),
+      ('person_sources', 'person_id'), ('person_sources', 'source_id')
+  ) as required(table_name, column_name)
+  left join information_schema.columns as actual
+    on actual.table_schema = 'public'
+   and actual.table_name = required.table_name
+   and actual.column_name = required.column_name
+  where actual.column_name is null;
+
+  if missing_columns is not null then
+    raise exception 'Umar import cannot run; missing columns: %', missing_columns;
+  end if;
+end
+$schema_check$;
+
+lock table
+  public.people,
+  public.period_people,
+  public.places,
+  public.events,
+  public.sources,
+  public.event_sources,
+  public.person_sources
+in share row exclusive mode;
+
+do $import$
+declare
+  content constant jsonb := $json$
 {
   "metadata": {
     "language": "ar",
@@ -350,3 +398,731 @@
     "bukhari_assassination"
   ]
 }
+
+$json$::jsonb;
+  item jsonb;
+  source_item jsonb;
+  source_alias text;
+  place_slug text;
+  place_confidence text;
+  event_slug text;
+  event_place_slug text;
+  event_year integer;
+  normalized_source_type text;
+  resolved_person_id bigint;
+  resolved_period_id bigint;
+  resolved_place_id bigint;
+  resolved_event_id bigint;
+  resolved_source_id bigint;
+  matched_count bigint;
+  affected_count bigint;
+  duplicate_value text;
+  approved_event_source_count integer := 0;
+  approved_person_source_count integer := 0;
+begin
+  if jsonb_array_length(content -> 'places') <> 8
+     or jsonb_array_length(content -> 'events') <> 10
+     or jsonb_array_length(content -> 'sources') <> 18
+     or jsonb_array_length(content -> 'personSourceIds') <> 7 then
+    raise exception 'Reviewed JSON shape changed: expected 8 places, 10 events, 18 sources, and 7 person sources';
+  end if;
+
+  select count(*), min(id)
+  into matched_count, resolved_person_id
+  from public.people
+  where slug = 'umar-ibn-al-khattab';
+
+  if matched_count <> 1 then
+    raise exception 'Expected exactly one person with slug umar-ibn-al-khattab; found %', matched_count;
+  end if;
+
+  select count(*), min(pp.period_id)
+  into matched_count, resolved_period_id
+  from public.period_people as pp
+  where pp.person_id = resolved_person_id
+    and pp.role = 'caliph'
+    and pp.is_primary = true;
+
+  if matched_count <> 1 then
+    raise exception 'Expected exactly one approved primary caliph period for Umar; found %', matched_count;
+  end if;
+
+  select count(*) into matched_count
+  from public.places where slug = 'al-madinah-al-munawwarah';
+  if matched_count <> 1 then
+    raise exception 'Expected exactly one existing place with slug al-madinah-al-munawwarah; found %', matched_count;
+  end if;
+
+  select count(*) into matched_count
+  from public.places where slug = 'al-qadisiyyah';
+  if matched_count <> 1 then
+    raise exception 'Expected exactly one existing place with slug al-qadisiyyah; found %', matched_count;
+  end if;
+
+  select count(*) into matched_count
+  from public.places where slug = 'al-quds';
+  if matched_count <> 1 then
+    raise exception 'Expected exactly one existing place with slug al-quds; found %', matched_count;
+  end if;
+
+  select count(*) into matched_count
+  from public.events where slug = 'battle-of-al-qadisiyyah';
+  if matched_count <> 1 then
+    raise exception 'Expected exactly one existing event with slug battle-of-al-qadisiyyah; found %', matched_count;
+  end if;
+
+  select count(*) into matched_count
+  from public.events where slug = 'umar-receives-al-quds';
+  if matched_count <> 1 then
+    raise exception 'Expected exactly one existing event with slug umar-receives-al-quds; found %', matched_count;
+  end if;
+
+  select duplicated.alias
+  into duplicate_value
+  from (
+    select value ->> 'id' as alias
+    from jsonb_array_elements(content -> 'sources')
+    group by value ->> 'id'
+    having count(*) > 1
+  ) as duplicated
+  limit 1;
+  if duplicate_value is not null then
+    raise exception 'Duplicate source alias in reviewed JSON: %', duplicate_value;
+  end if;
+
+  duplicate_value := null;
+  select duplicated.place_key
+  into duplicate_value
+  from (
+    select value ->> 'key' as place_key
+    from jsonb_array_elements(content -> 'places')
+    group by value ->> 'key'
+    having count(*) > 1
+  ) as duplicated
+  limit 1;
+  if duplicate_value is not null then
+    raise exception 'Duplicate place key (and therefore proposed slug) in reviewed JSON: %', duplicate_value;
+  end if;
+
+  duplicate_value := null;
+  select duplicated.event_key
+  into duplicate_value
+  from (
+    select value ->> 'key' as event_key
+    from jsonb_array_elements(content -> 'events')
+    group by value ->> 'key'
+    having count(*) > 1
+  ) as duplicated
+  limit 1;
+  if duplicate_value is not null then
+    raise exception 'Duplicate event key (and therefore proposed slug) in reviewed JSON: %', duplicate_value;
+  end if;
+
+  duplicate_value := null;
+  select proposed.slug
+  into duplicate_value
+  from (
+    values
+      ('al-yarmouk'),
+      ('al-madain'),
+      ('al-hijaz'),
+      ('al-fustat'),
+      ('nahavand')
+  ) as proposed(slug)
+  group by proposed.slug
+  having count(*) > 1
+  limit 1;
+  if duplicate_value is not null then
+    raise exception 'Duplicate approved new place slug: %', duplicate_value;
+  end if;
+
+  duplicate_value := null;
+  select proposed.slug
+  into duplicate_value
+  from (
+    values
+      ('battle-of-al-yarmouk'),
+      ('conquest-of-al-madain'),
+      ('establishment-of-the-diwans'),
+      ('adoption-of-the-hijri-calendar'),
+      ('year-of-al-ramada'),
+      ('conquest-of-egypt-and-fustat'),
+      ('battle-of-nahavand'),
+      ('assassination-of-umar')
+  ) as proposed(slug)
+  group by proposed.slug
+  having count(*) > 1
+  limit 1;
+  if duplicate_value is not null then
+    raise exception 'Duplicate approved new event slug: %', duplicate_value;
+  end if;
+
+  duplicate_value := null;
+  select duplicated.url
+  into duplicate_value
+  from (
+    select value ->> 'url' as url
+    from jsonb_array_elements(content -> 'sources')
+    group by value ->> 'url'
+    having count(*) > 1
+  ) as duplicated
+  limit 1;
+  if duplicate_value is not null then
+    raise exception 'Duplicate source URL in reviewed JSON: %', duplicate_value;
+  end if;
+
+  duplicate_value := null;
+  select sources.url
+  into duplicate_value
+  from public.sources
+  where url in (
+    select value ->> 'url' from jsonb_array_elements(content -> 'sources')
+  )
+  group by sources.url
+  having count(*) > 1
+  limit 1;
+  if duplicate_value is not null then
+    raise exception 'Existing sources are not unique by URL: %', duplicate_value;
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements(content -> 'places') as place(value)
+    where place.value ->> 'key' not in (
+      'medina', 'yarmouk', 'al_qadisiyyah', 'al_quds',
+      'medain', 'hijaz', 'fustat', 'nahavand'
+    )
+       or place.value ->> 'coordinateConfidence' not in ('high', 'low', 'approximate')
+  ) then
+    raise exception 'Reviewed JSON contains an unsupported place key or coordinate confidence';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements(content -> 'events') as event(value)
+    where event.value ->> 'key' not in (
+      'battle_yarmouk', 'battle_qadisiyyah', 'umar_jerusalem',
+      'conquest_madain', 'diwans', 'hijri_calendar', 'year_ramada',
+      'conquest_egypt', 'battle_nahavand', 'assassination_umar'
+    )
+       or not exists (
+         select 1
+         from jsonb_array_elements(content -> 'places') as place(value)
+         where place.value ->> 'key' = event.value ->> 'placeKey'
+       )
+  ) then
+    raise exception 'Reviewed JSON contains an unsupported event key or unresolved placeKey';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements(content -> 'sources') as source(value)
+    where source.value ->> 'type' not in (
+      'classical_biography', 'classical_history',
+      'authenticated_hadith', 'classical_sira', 'other'
+    )
+  ) then
+    raise exception 'Reviewed JSON contains an unsupported source type';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements(content -> 'events') as event(value)
+    cross join lateral jsonb_array_elements_text(event.value -> 'sourceIds') as reference(alias)
+    where not exists (
+      select 1
+      from jsonb_array_elements(content -> 'sources') as source(value)
+      where source.value ->> 'id' = reference.alias
+    )
+  ) then
+    raise exception 'An event references an unknown source alias';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements(content -> 'events') as event(value)
+    cross join lateral jsonb_array_elements_text(event.value -> 'sourceIds') as reference(alias)
+    group by event.value ->> 'key', reference.alias
+    having count(*) > 1
+  ) then
+    raise exception 'An event contains a duplicate source alias relationship';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements_text(content -> 'personSourceIds') as reference(alias)
+    where not exists (
+      select 1
+      from jsonb_array_elements(content -> 'sources') as source(value)
+      where source.value ->> 'id' = reference.alias
+    )
+  ) then
+    raise exception 'personSourceIds contains an unknown source alias';
+  end if;
+
+  if exists (
+    select 1
+    from jsonb_array_elements_text(content -> 'personSourceIds') as reference(alias)
+    group by reference.alias
+    having count(*) > 1
+  ) then
+    raise exception 'personSourceIds contains a duplicate source alias relationship';
+  end if;
+
+  update public.people
+  set name = content #>> '{person,name}',
+      brief_bio = content #>> '{person,briefBio}'
+  where id = resolved_person_id;
+  get diagnostics affected_count = row_count;
+  if affected_count <> 1 then
+    raise exception 'Umar person update affected % rows instead of 1', affected_count;
+  end if;
+
+  for item in select value from jsonb_array_elements(content -> 'places') loop
+    place_slug := case item ->> 'key'
+      when 'medina' then 'al-madinah-al-munawwarah'
+      when 'yarmouk' then 'al-yarmouk'
+      when 'al_qadisiyyah' then 'al-qadisiyyah'
+      when 'al_quds' then 'al-quds'
+      when 'medain' then 'al-madain'
+      when 'hijaz' then 'al-hijaz'
+      when 'fustat' then 'al-fustat'
+      when 'nahavand' then 'nahavand'
+      else null
+    end;
+
+    place_confidence := case item ->> 'coordinateConfidence'
+      when 'high' then 'confirmed'
+      when 'low' then 'approximate'
+      when 'approximate' then 'approximate'
+      else null
+    end;
+
+    if place_slug is null or place_confidence is null then
+      raise exception 'Unsupported place key or coordinate confidence: % / %',
+        item ->> 'key', item ->> 'coordinateConfidence';
+    end if;
+
+    if (item ->> 'key') in ('medina', 'al_qadisiyyah', 'al_quds') then
+      update public.places
+      set name = item ->> 'name',
+          lat = (item ->> 'latitude')::double precision,
+          lng = (item ->> 'longitude')::double precision,
+          coordinate_confidence = place_confidence,
+          location_note = item ->> 'note'
+      where slug = place_slug;
+      get diagnostics affected_count = row_count;
+      if affected_count <> 1 then
+        raise exception 'Existing place % update affected % rows instead of 1', place_slug, affected_count;
+      end if;
+    else
+      -- This collision check is intentionally immediately before each insert/upsert.
+      select count(*) into matched_count
+      from public.places
+      where slug = place_slug and name is distinct from item ->> 'name';
+      if matched_count > 0 then
+        raise exception 'New place slug % already belongs to a different record', place_slug;
+      end if;
+
+      select count(*) into matched_count
+      from public.places
+      where name = item ->> 'name' and slug is distinct from place_slug;
+      if matched_count > 0 then
+        raise exception 'New place name % already exists under another slug', item ->> 'name';
+      end if;
+
+      insert into public.places (
+        slug, name, lat, lng, coordinate_confidence, location_note
+      ) values (
+        place_slug,
+        item ->> 'name',
+        (item ->> 'latitude')::double precision,
+        (item ->> 'longitude')::double precision,
+        place_confidence,
+        item ->> 'note'
+      )
+      on conflict (slug) do update
+      set name = excluded.name,
+          lat = excluded.lat,
+          lng = excluded.lng,
+          coordinate_confidence = excluded.coordinate_confidence,
+          location_note = excluded.location_note;
+    end if;
+  end loop;
+
+  for item in select value from jsonb_array_elements(content -> 'events') loop
+    event_slug := case item ->> 'key'
+      when 'battle_yarmouk' then 'battle-of-al-yarmouk'
+      when 'battle_qadisiyyah' then 'battle-of-al-qadisiyyah'
+      when 'umar_jerusalem' then 'umar-receives-al-quds'
+      when 'conquest_madain' then 'conquest-of-al-madain'
+      when 'diwans' then 'establishment-of-the-diwans'
+      when 'hijri_calendar' then 'adoption-of-the-hijri-calendar'
+      when 'year_ramada' then 'year-of-al-ramada'
+      when 'conquest_egypt' then 'conquest-of-egypt-and-fustat'
+      when 'battle_nahavand' then 'battle-of-nahavand'
+      when 'assassination_umar' then 'assassination-of-umar'
+      else null
+    end;
+
+    event_place_slug := case item ->> 'placeKey'
+      when 'medina' then 'al-madinah-al-munawwarah'
+      when 'yarmouk' then 'al-yarmouk'
+      when 'al_qadisiyyah' then 'al-qadisiyyah'
+      when 'al_quds' then 'al-quds'
+      when 'medain' then 'al-madain'
+      when 'hijaz' then 'al-hijaz'
+      when 'fustat' then 'al-fustat'
+      when 'nahavand' then 'nahavand'
+      else null
+    end;
+
+    -- Migration #3 is authoritative for these two existing reviewed dates.
+    event_year := case item ->> 'key'
+      when 'battle_qadisiyyah' then 15
+      when 'umar_jerusalem' then 16
+      else (item ->> 'hijriYear')::integer
+    end;
+
+    if event_slug is null or event_place_slug is null then
+      raise exception 'Unsupported event or place key: % / %', item ->> 'key', item ->> 'placeKey';
+    end if;
+
+    select count(*), min(id)
+    into matched_count, resolved_place_id
+    from public.places
+    where slug = event_place_slug;
+    if matched_count <> 1 then
+      raise exception 'Expected exactly one event place with slug %; found %', event_place_slug, matched_count;
+    end if;
+
+    if (item ->> 'key') in ('battle_qadisiyyah', 'umar_jerusalem') then
+      update public.events
+      set period_id = resolved_period_id,
+          place_id = resolved_place_id,
+          title = item ->> 'title',
+          description = item ->> 'summary',
+          significance = item ->> 'significance',
+          start_year = event_year,
+          end_year = null
+      where slug = event_slug;
+      get diagnostics affected_count = row_count;
+      if affected_count <> 1 then
+        raise exception 'Existing event % update affected % rows instead of 1', event_slug, affected_count;
+      end if;
+    else
+      -- This collision check is intentionally immediately before each insert/upsert.
+      select count(*) into matched_count
+      from public.events
+      where slug = event_slug and title is distinct from item ->> 'title';
+      if matched_count > 0 then
+        raise exception 'New event slug % already belongs to a different record', event_slug;
+      end if;
+
+      insert into public.events (
+        slug, period_id, place_id, title, description,
+        significance, start_year, end_year
+      ) values (
+        event_slug, resolved_period_id, resolved_place_id, item ->> 'title', item ->> 'summary',
+        item ->> 'significance', event_year, null
+      )
+      on conflict (slug) do update
+      set period_id = excluded.period_id,
+          place_id = excluded.place_id,
+          title = excluded.title,
+          description = excluded.description,
+          significance = excluded.significance,
+          start_year = excluded.start_year,
+          end_year = excluded.end_year;
+    end if;
+  end loop;
+
+  for item in select value from jsonb_array_elements(content -> 'sources') loop
+    normalized_source_type := case item ->> 'type'
+      when 'classical_biography' then 'book'
+      when 'classical_history' then 'book'
+      when 'authenticated_hadith' then 'hadith'
+      when 'hadith_commentary' then 'hadith'
+      when 'classical_sira' then 'book'
+      when 'quran' then 'other'
+      when 'other' then 'other'
+      else null
+    end;
+
+    if normalized_source_type is null then
+      raise exception 'Unsupported source type for alias %: %', item ->> 'id', item ->> 'type';
+    end if;
+
+    update public.sources
+    set title = item ->> 'title',
+        author = item ->> 'author',
+        source_type = normalized_source_type
+    where url = item ->> 'url';
+    get diagnostics affected_count = row_count;
+
+    if affected_count = 0 then
+      insert into public.sources (title, author, url, source_type)
+      values (item ->> 'title', item ->> 'author', item ->> 'url', normalized_source_type);
+    elsif affected_count <> 1 then
+      raise exception 'Source URL % matched % rows instead of at most 1', item ->> 'url', affected_count;
+    end if;
+  end loop;
+
+  for item in select value from jsonb_array_elements(content -> 'events') loop
+    event_slug := case item ->> 'key'
+      when 'battle_yarmouk' then 'battle-of-al-yarmouk'
+      when 'battle_qadisiyyah' then 'battle-of-al-qadisiyyah'
+      when 'umar_jerusalem' then 'umar-receives-al-quds'
+      when 'conquest_madain' then 'conquest-of-al-madain'
+      when 'diwans' then 'establishment-of-the-diwans'
+      when 'hijri_calendar' then 'adoption-of-the-hijri-calendar'
+      when 'year_ramada' then 'year-of-al-ramada'
+      when 'conquest_egypt' then 'conquest-of-egypt-and-fustat'
+      when 'battle_nahavand' then 'battle-of-nahavand'
+      when 'assassination_umar' then 'assassination-of-umar'
+    end;
+
+    select id into resolved_event_id from public.events where slug = event_slug;
+
+    for source_alias in select jsonb_array_elements_text(item -> 'sourceIds') loop
+      select value into source_item
+      from jsonb_array_elements(content -> 'sources')
+      where value ->> 'id' = source_alias;
+      if source_item is null then
+        raise exception 'Event % references unknown source alias %', event_slug, source_alias;
+      end if;
+
+      select count(*), min(id)
+      into matched_count, resolved_source_id
+      from public.sources
+      where url = source_item ->> 'url';
+      if matched_count <> 1 then
+        raise exception 'Source alias % resolved to % database rows', source_alias, matched_count;
+      end if;
+
+      insert into public.event_sources (event_id, source_id)
+      values (resolved_event_id, resolved_source_id)
+      on conflict (event_id, source_id) do nothing;
+    end loop;
+  end loop;
+
+  for source_alias in select jsonb_array_elements_text(content -> 'personSourceIds') loop
+    select value into source_item
+    from jsonb_array_elements(content -> 'sources')
+    where value ->> 'id' = source_alias;
+    if source_item is null then
+      raise exception 'Person source alias was not found in reviewed JSON: %', source_alias;
+    end if;
+
+    select count(*), min(id)
+    into matched_count, resolved_source_id
+    from public.sources
+    where url = source_item ->> 'url';
+    if matched_count <> 1 then
+      raise exception 'Person source alias % resolved to % database rows', source_alias, matched_count;
+    end if;
+
+    insert into public.person_sources (person_id, source_id)
+    values (resolved_person_id, resolved_source_id)
+    on conflict (person_id, source_id) do nothing;
+  end loop;
+
+  select count(*), min(id)
+  into matched_count, resolved_person_id
+  from public.people
+  where slug = 'umar-ibn-al-khattab';
+  if matched_count <> 1 then
+    raise exception 'Umar person postcondition failed: found % rows by slug', matched_count;
+  end if;
+
+  if (select brief_bio from public.people where id = resolved_person_id)
+       is distinct from content #>> '{person,briefBio}' then
+    raise exception 'Umar biography postcondition failed';
+  end if;
+
+  select count(*)
+  into matched_count
+  from public.period_people
+  where person_id = resolved_person_id
+    and period_id = resolved_period_id
+    and role = 'caliph'
+    and is_primary = true;
+  if matched_count <> 1 then
+    raise exception 'Umar primary period relationship postcondition failed';
+  end if;
+
+  for item in select value from jsonb_array_elements(content -> 'places') loop
+    place_slug := case item ->> 'key'
+      when 'medina' then 'al-madinah-al-munawwarah'
+      when 'yarmouk' then 'al-yarmouk'
+      when 'al_qadisiyyah' then 'al-qadisiyyah'
+      when 'al_quds' then 'al-quds'
+      when 'medain' then 'al-madain'
+      when 'hijaz' then 'al-hijaz'
+      when 'fustat' then 'al-fustat'
+      when 'nahavand' then 'nahavand'
+    end;
+    place_confidence := case item ->> 'coordinateConfidence'
+      when 'high' then 'confirmed'
+      when 'low' then 'approximate'
+      when 'approximate' then 'approximate'
+    end;
+
+    if not exists (
+      select 1 from public.places
+      where slug = place_slug
+        and name = item ->> 'name'
+        and lat = (item ->> 'latitude')::double precision
+        and lng = (item ->> 'longitude')::double precision
+        and coordinate_confidence = place_confidence
+        and location_note = item ->> 'note'
+    ) then
+      raise exception 'Place postcondition failed for slug %', place_slug;
+    end if;
+  end loop;
+
+  for item in select value from jsonb_array_elements(content -> 'events') loop
+    event_slug := case item ->> 'key'
+      when 'battle_yarmouk' then 'battle-of-al-yarmouk'
+      when 'battle_qadisiyyah' then 'battle-of-al-qadisiyyah'
+      when 'umar_jerusalem' then 'umar-receives-al-quds'
+      when 'conquest_madain' then 'conquest-of-al-madain'
+      when 'diwans' then 'establishment-of-the-diwans'
+      when 'hijri_calendar' then 'adoption-of-the-hijri-calendar'
+      when 'year_ramada' then 'year-of-al-ramada'
+      when 'conquest_egypt' then 'conquest-of-egypt-and-fustat'
+      when 'battle_nahavand' then 'battle-of-nahavand'
+      when 'assassination_umar' then 'assassination-of-umar'
+    end;
+    event_place_slug := case item ->> 'placeKey'
+      when 'medina' then 'al-madinah-al-munawwarah'
+      when 'yarmouk' then 'al-yarmouk'
+      when 'al_qadisiyyah' then 'al-qadisiyyah'
+      when 'al_quds' then 'al-quds'
+      when 'medain' then 'al-madain'
+      when 'hijaz' then 'al-hijaz'
+      when 'fustat' then 'al-fustat'
+      when 'nahavand' then 'nahavand'
+    end;
+    event_year := case item ->> 'key'
+      when 'battle_qadisiyyah' then 15
+      when 'umar_jerusalem' then 16
+      else (item ->> 'hijriYear')::integer
+    end;
+
+    if not exists (
+      select 1
+      from public.events as event
+      join public.places as place on place.id = event.place_id
+      where event.slug = event_slug
+        and event.period_id = resolved_period_id
+        and place.slug = event_place_slug
+        and event.title = item ->> 'title'
+        and event.description = item ->> 'summary'
+        and event.significance = item ->> 'significance'
+        and event.start_year = event_year
+        and event.end_year is null
+    ) then
+      raise exception 'Event postcondition failed for slug %', event_slug;
+    end if;
+  end loop;
+
+  for item in select value from jsonb_array_elements(content -> 'sources') loop
+    normalized_source_type := case item ->> 'type'
+      when 'classical_biography' then 'book'
+      when 'classical_history' then 'book'
+      when 'authenticated_hadith' then 'hadith'
+      when 'hadith_commentary' then 'hadith'
+      when 'classical_sira' then 'book'
+      when 'quran' then 'other'
+      when 'other' then 'other'
+    end;
+
+    select count(*)
+    into matched_count
+    from public.sources
+    where url = item ->> 'url';
+    if matched_count <> 1 then
+      raise exception 'Source URL postcondition failed for alias %: found % rows', item ->> 'id', matched_count;
+    end if;
+
+    if not exists (
+      select 1 from public.sources
+      where url = item ->> 'url'
+        and title = item ->> 'title'
+        and author is not distinct from item ->> 'author'
+        and sources.source_type = normalized_source_type
+    ) then
+      raise exception 'Source postcondition failed for alias %', item ->> 'id';
+    end if;
+  end loop;
+
+  for item in select value from jsonb_array_elements(content -> 'events') loop
+    event_slug := case item ->> 'key'
+      when 'battle_yarmouk' then 'battle-of-al-yarmouk'
+      when 'battle_qadisiyyah' then 'battle-of-al-qadisiyyah'
+      when 'umar_jerusalem' then 'umar-receives-al-quds'
+      when 'conquest_madain' then 'conquest-of-al-madain'
+      when 'diwans' then 'establishment-of-the-diwans'
+      when 'hijri_calendar' then 'adoption-of-the-hijri-calendar'
+      when 'year_ramada' then 'year-of-al-ramada'
+      when 'conquest_egypt' then 'conquest-of-egypt-and-fustat'
+      when 'battle_nahavand' then 'battle-of-nahavand'
+      when 'assassination_umar' then 'assassination-of-umar'
+    end;
+
+    for source_alias in select jsonb_array_elements_text(item -> 'sourceIds') loop
+      select value into source_item
+      from jsonb_array_elements(content -> 'sources')
+      where value ->> 'id' = source_alias;
+
+      select id into resolved_source_id
+      from public.sources
+      where url = source_item ->> 'url';
+
+      if not exists (
+        select 1
+        from public.event_sources as relationship
+        join public.events as event on event.id = relationship.event_id
+        where event.slug = event_slug
+          and relationship.source_id = resolved_source_id
+      ) then
+        raise exception 'Missing approved event_sources relationship: % -> %', event_slug, source_alias;
+      end if;
+
+      approved_event_source_count := approved_event_source_count + 1;
+    end loop;
+  end loop;
+
+  if approved_event_source_count <> 21 then
+    raise exception 'Expected 21 approved event_sources relationships; verified %', approved_event_source_count;
+  end if;
+
+  for source_alias in select jsonb_array_elements_text(content -> 'personSourceIds') loop
+    select value into source_item
+    from jsonb_array_elements(content -> 'sources')
+    where value ->> 'id' = source_alias;
+
+    select id into resolved_source_id
+    from public.sources
+    where url = source_item ->> 'url';
+
+    if not exists (
+      select 1
+      from public.person_sources
+      where person_id = resolved_person_id
+        and source_id = resolved_source_id
+    ) then
+      raise exception 'Missing approved person_sources relationship: umar-ibn-al-khattab -> %', source_alias;
+    end if;
+
+    approved_person_source_count := approved_person_source_count + 1;
+  end loop;
+
+  if approved_person_source_count <> 7 then
+    raise exception 'Expected 7 approved person_sources relationships; verified %', approved_person_source_count;
+  end if;
+end
+$import$;
+
+commit;
