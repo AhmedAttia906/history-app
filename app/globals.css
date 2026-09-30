@@ -19,12 +19,14 @@ body {
 }
 
 .biography-book-perspective {
+  position: relative;
   perspective: 900px;
 }
 
 .biography-book-page {
   position: relative;
-  min-height: 14.5rem;
+  height: clamp(20rem, 52svh, 28rem);
+  overflow: hidden;
   border: 1px solid rgb(207 180 111 / 55%);
   border-radius: 0.75rem;
   background:
@@ -33,6 +35,45 @@ body {
   padding: 1rem 1.125rem;
   box-shadow: inset 0 0 2.5rem rgb(123 91 43 / 4%);
   transform-origin: right center;
+}
+
+.biography-book-page--measure {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.biography-book-measure-content {
+  display: flow-root;
+}
+
+.biography-book-section + .biography-book-section {
+  margin-top: 1rem;
+}
+
+.biography-book-heading {
+  margin: 0 0 0.375rem;
+  color: #876522;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+}
+
+.biography-book-text {
+  margin: 0;
+  color: #3f493f;
+  font-size: 0.82rem;
+  line-height: 1.5rem;
+}
+
+.biography-book-error {
+  margin: 0;
+  color: #7a342b;
+  font-size: 0.875rem;
+  line-height: 1.75rem;
 }
 
 .biography-book-page--next {
@@ -67,8 +108,17 @@ body {
 
 @media (min-width: 640px) {
   .biography-book-page {
-    min-height: 15.5rem;
+    height: clamp(18rem, 38vh, 22rem);
     padding: 1.25rem 1.5rem;
+  }
+
+  .biography-book-heading {
+    font-size: 0.95rem;
+  }
+
+  .biography-book-text {
+    font-size: 0.875rem;
+    line-height: 1.75rem;
   }
 }
 

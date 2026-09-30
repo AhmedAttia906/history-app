@@ -20,8 +20,8 @@
 
 ```mermaid
 graph TD
-  Browser --> Next.js_App[Next.js App]
-  Next.js_App --> Supabase[Supabase \(Postgres + Auth\)]
+    Browser["Browser"] --> NextApp["Next.js App"]
+    NextApp --> Supabase["Supabase (Postgres + Auth)"]
 ```
 
 - **Browser:** يعرض الواجهة التفاعلية والخريطة.
