@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import BiographyBook from "@/components/BiographyBook";
+import BiographyBook from "@/components/biography/BiographyBook";
 import Map, { type HistoricalEvent, type Place } from "@/components/Map";
 import { formatHijriYearRange } from "@/lib/hijri";
 
